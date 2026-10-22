@@ -256,7 +256,28 @@ if [[ "${mode}" == "run" ]]; then
     }
     trap cleanup INT TERM
 
-    sleep 1
+    robot_ready_port=5631
+    for ((i = 0; i < ${#robot_args[@]}; ++i)); do
+        case "${robot_args[i]}" in
+            --rx-port) robot_ready_port="${robot_args[i + 1]:-${robot_ready_port}}" ;;
+            --rx-port=*) robot_ready_port="${robot_args[i]#*=}" ;;
+        esac
+    done
+
+    echo "==> waiting for responder to listen on UDP port ${robot_ready_port}"
+    responder_ready=false
+    for _ in $(seq 1 100); do
+        if run_on_host "${robot_host}" \
+            "ss -lun 2>/dev/null | grep -q '[:.]${robot_ready_port} '"; then
+            responder_ready=true
+            break
+        fi
+        sleep 0.2
+    done
+    if [[ "${responder_ready}" != true ]]; then
+        echo "warning: responder did not open port ${robot_ready_port} within 20 s; starting initiator anyway" >&2
+    fi
+
     echo "==> starting initiator on ${controller_host} (${duration} s)"
     set +e
     run_on_host "${controller_host}" "${controller_command}"
