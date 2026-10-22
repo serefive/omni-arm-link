@@ -158,52 +158,102 @@ sudo scripts/install_wfbng.sh 8812eu
 
 ### 2. 生成密钥对
 
-详见 [通信方案](通信方案.md)。
+密钥的生成方式详见 [通信方案](通信方案.md)。本仓库以 `config/keys` 为唯一密钥来源，生成密钥：
 
 ```bash
 scripts/gen_keys.sh config/keys
 ```
 
-将 `drone.key` 复制到机器人端，`gs.key` 复制到遥控器端，并将**两个密钥**都
-复制到被动监听端（它需要解码上下行两个方向）。
+部署时直接分发这些密钥即可。
 
-如果报错 `error: wfb_keygen not found, install wfb-ng first`，说明第 1 步尚未
-完成，或只安装了无线驱动。可以先执行第 1 步；若暂时不需要驱动，也可以只
-构建并安装 WFB-NG 用户态工具：
+占位符说明：
 
-```bash
-git clone --depth 1 https://github.com/svpcom/wfb-ng.git ~/wfb-ng
-make -C ~/wfb-ng -j"$(nproc)" all_bin wfb_rtsp
-cd ~/wfb-ng
-sudo env VERSION="$(make -s version | sed -n 's/^VERSION=//p')" \
-    COMMIT="$(git rev-parse HEAD)" python3 setup.py install
-```
+- `<robot-user>@<robot-host>`：机器人 SSH 登录目标，如 `user@host`
+- `<controller-user>@<controller-host>`：遥控器 SSH 登录目标，本机可用 `local`
+- `<robot-wlan>` / `<controller-wlan>` / `<monitor-wlan>`：对应主机的无线网卡名，用 `ip -brief link` 查看
+- `<robot-repo>` / `<controller-repo>`：各主机上本仓库的路径，如 `~/omni-arm-link`
 
-安装后确认命令可用，再重新生成密钥：
+#### 密钥校验
 
 ```bash
-command -v wfb_keygen wfb_tx wfb_rx wfb-server wfb-cli
-scripts/gen_keys.sh config/keys
+sha256sum config/keys/drone.key config/keys/gs.key
 ```
 
-> 不要直接执行 `make`：WFB-NG 的默认目标还会构建依赖 catch2 的测试程序，而
-> 安装脚本并没有安装 catch2。本仓库的 `scripts/install_wfbng.sh` 已改为
-> `make all_bin wfb_rtsp`。
->
-> 重新生成密钥会覆盖 `config/keys` 中的旧密钥，如需保留请先备份：
-> `cp -a config/keys config/keys.bak-$(date +%Y%m%d-%H%M%S)`。
+#### 分发密钥：机器人端（系统级）
+
+密钥放到 `/etc`：
+
+```bash
+scp config/keys/drone.key <robot-user>@<robot-host>:/tmp/drone.key
+ssh <robot-user>@<robot-host> \
+  'sudo install -m600 -o root -g root /tmp/drone.key /etc/drone.key && rm -f /tmp/drone.key'
+```
+
+#### 分发密钥：遥控器端（用户级）
+
+密钥放到运行 `wfb-server` 的用户的 `$HOME/.local/etc`：
+
+```bash
+install -Dm600 config/keys/gs.key "$HOME/.local/etc/gs.key"
+```
+
+> **注意：** 用户级安装时，密钥必须放到实际运行 `wfb-server` 的用户的
+> `$HOME/.local/etc` 下，而不是 `/etc`。遥控器只使用 `gs.key`；若该主机同时
+> 充当被动监听端，则需要把两个密钥都更新。
+
+#### 被动监听端
+
+被动监听端（无论系统级还是用户级）需要同时具备 `drone.key` 和 `gs.key`：
+
+- 系统级：`/etc/drone.key`、`/etc/gs.key`
+- 用户级：`$HOME/.local/etc/drone.key`、`$HOME/.local/etc/gs.key`
+install -Dm600 config/keys/gs.key "$HOME/.local/etc/gs.key"
+
+#### 启动 WFB-NG
+
+机器人端（系统级）：
+
+```bash
+ssh <robot-user>@<robot-host>
+cd <robot-repo>
+sudo scripts/wfb_server.sh robot <robot-wlan>
+```
+
+遥控器端（用户级，普通用户执行 `sudo`）：
+
+```bash
+cd <controller-repo>
+sudo scripts/wfb_server.sh controller <controller-wlan>
+```
+
+被动监听端：
+
+```bash
+sudo scripts/wfb_server.sh monitor <monitor-wlan>
+```
+
+#### 确认密钥路径
+
+```bash
+pgrep -af 'wfb-server|wfb_tx|wfb_rx'
+```
+
+- 机器人应出现 `-K /etc/drone.key`
+- 遥控器应出现 `-K /home/<user>/.local/etc/gs.key`
+
+如果路径与预期不符，说明启动到了另一套安装（系统级/用户级）或旧进程未清理。
 
 ### 3. 配置各主机
 
 ```bash
 # 在机器人端
-sudo scripts/setup_radio.sh robot wlx140a022213ac --start
+sudo scripts/setup_radio.sh robot <robot-wlan> --start
 
 # 在遥控器端
-sudo scripts/setup_radio.sh controller wlx140a022213ac --start
+sudo scripts/setup_radio.sh controller <controller-wlan> --start
 
 # 在监听端（只收，发射功率关闭）
-sudo scripts/setup_radio.sh monitor wlx140a022213ac --start
+sudo scripts/setup_radio.sh monitor <monitor-wlan> --start
 ```
 
 该脚本会安装 `/etc/wifibroadcast.cfg`、复制密钥、校验驱动并启动 WFB-NG
@@ -302,8 +352,8 @@ scripts/link_test_2host.sh report \
 
 只需一台主机、两块支持 Monitor Mode + 注入的无线网卡（例如两块 RTL8812EU），
 即可在一台机器上同时充当机器人端与遥控器端，跑通完整的 WFB-NG 空口链路。
-两块网卡使用相同信道（`wifi_channel = 165`）与 `link_domain`，一块（`wlx140a022213ac`）
-作机器人，另一块（`wlx140a022213a5`）作遥控器。
+两块网卡使用相同信道（`wifi_channel = 165`）与 `link_domain`，一块（`<robot-wlan>`）
+作机器人，另一块（`<controller-wlan>`）作遥控器。
 
 两份 profile 的 `stats_port` / `api_port`（8002/8102 与 8003/8103）本就不同，
 因此两个 `wfb-server` 实例可以并存。遥测/控制仍走 `127.0.0.1`；链路测试的
@@ -347,15 +397,15 @@ link_domain = 'oal-link'
 EOF
 
 # 3. 调好两块网卡
-for w in wlx140a022213ac wlx140a022213a5; do
+for w in <robot-wlan> <controller-wlan>; do
     sudo ip link set "$w" up
     sudo ip link set "$w" mtu 2312 txqueuelen 1000
 done
 sudo iw reg set BO
 
 # 4. 起两个 WFB-NG 实例（同信道、同 link_domain）
-sudo scripts/wfb_server.sh robot      wlx140a022213ac &
-sudo scripts/wfb_server.sh controller wlx140a022213a5 &
+sudo scripts/wfb_server.sh robot      <robot-wlan> &
+sudo scripts/wfb_server.sh controller <controller-wlan> &
 ss -ltnup | grep -E '563[12]|810[23]'   # 563x=UDP wfb_tx；810x=TCP 统计 API
 wfb-cli robot          # 另一个终端查看射频统计（controller 同理）
 
